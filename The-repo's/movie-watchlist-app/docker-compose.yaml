@@ -1,0 +1,69 @@
+services:
+  # MongoDB Database
+  mongodb:
+    image: mongo:7.0
+    container_name: movie-watchlist-db
+    restart: unless-stopped
+    environment:
+      MONGO_INITDB_DATABASE: movie_watchlist
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongodb_data:/data/db
+    networks:
+      - movie-network
+    healthcheck:
+      test: echo 'db.runCommand("ping").ok' | mongosh localhost:27017/movie_watchlist --quiet
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Flask Application
+  flask-app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: movie-watchlist-app
+    restart: unless-stopped
+    environment:
+      - MONGO_URI=mongodb://mongodb:27017/
+      - DB_NAME=movie_watchlist
+      - FLASK_ENV=production
+      - PORT=5000
+    expose:
+      - "5000"
+    depends_on:
+      mongodb:
+        condition: service_healthy
+    networks:
+      - movie-network
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; s=socket.socket(); s.settimeout(5); s.connect(('127.0.0.1', 5000)); s.close()"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # Nginx Reverse Proxy
+  nginx:
+    build:
+      context: .
+      dockerfile: nginx/Dockerfile
+    container_name: movie-watchlist-nginx
+    restart: unless-stopped
+    ports:
+      - "8083:80"
+    volumes:
+      - ./static:/usr/share/nginx/html:ro
+    depends_on:
+      - flask-app
+    networks:
+      - movie-network
+
+volumes:
+  mongodb_data:
+    driver: local
+
+networks:
+  movie-network:
+    driver: bridge

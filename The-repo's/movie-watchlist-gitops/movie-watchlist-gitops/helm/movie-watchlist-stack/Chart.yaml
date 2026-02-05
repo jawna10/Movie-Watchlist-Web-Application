@@ -1,0 +1,12 @@
+apiVersion: v2
+name: movie-watchlist-stack
+description: Complete Movie Watchlist application stack with MongoDB
+type: application
+version: 0.1.0
+appVersion: "1.0.0"
+
+dependencies:
+  # my application
+  - name: movie-watchlist
+    version: "0.1.0"
+    repository: "file://../movie-watchlist"

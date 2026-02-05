@@ -1,0 +1,6 @@
+dependencies:
+- name: movie-watchlist
+  repository: file://../movie-watchlist
+  version: 0.1.0
+digest: sha256:643ba5adf97b57dcda314dfd205a8b2b1a063035a5006ed3d9049a905b846bd0
+generated: "2025-10-05T09:43:23.605960912Z"

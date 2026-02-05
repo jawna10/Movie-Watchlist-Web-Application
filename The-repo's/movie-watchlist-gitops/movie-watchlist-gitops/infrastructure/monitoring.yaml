@@ -1,0 +1,127 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: monitoring
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://prometheus-community.github.io/helm-charts
+    chart: kube-prometheus-stack
+    targetRevision: 45.0.0
+    helm:
+      values: |
+        # Prometheus Operator
+        prometheusOperator:
+          admissionWebhooks:
+            enabled: false
+          tls:
+            enabled: false  
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
+        
+        # Grafana
+        grafana:
+          enabled: true
+          adminPassword: admin123
+          persistence:
+            enabled: false
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
+          sidecar:
+            dashboards:
+              enabled: true
+              label: grafana_dashboard
+        
+        # Prometheus
+        prometheus:
+          prometheusSpec:
+            serviceMonitorSelectorNilUsesHelmValues: false
+            retention: 2d
+            storageSpec: {}
+            resources:
+              requests:
+                cpu: 200m
+                memory: 512Mi
+              limits:
+                cpu: 500m
+                memory: 1Gi
+        
+        # AlertManager
+        alertmanager:
+          enabled: true
+          alertmanagerSpec:
+            storage: {}
+            resources:
+              requests:
+                cpu: 50m
+                memory: 64Mi
+              limits:
+                cpu: 100m
+                memory: 128Mi
+          config:
+            global:
+              resolve_timeout: 5m
+            route:
+              group_by: ['alertname', 'cluster', 'service']
+              group_wait: 10s
+              group_interval: 10s
+              repeat_interval: 12h
+              receiver: 'null'
+              routes:
+              - match:
+                  alertname: Watchdog
+                receiver: 'null'
+            receivers:
+            - name: 'null'
+        
+        # Kube State Metrics
+        kubeStateMetrics:
+          enabled: true
+        
+        # Node Exporter
+        nodeExporter:
+          enabled: true
+        
+        # Disable default rules we don't need
+        defaultRules:
+          create: true
+          rules:
+            etcd: false
+            kubeScheduler: false
+  
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: monitoring
+  
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+  
+  # Ignore fields managed by kube-controller-manager
+  ignoreDifferences:
+    - group: apps
+      kind: Deployment
+      jsonPointers:
+        - /spec/replicas
+        - /spec/template/metadata/annotations/deployment.kubernetes.io~1revision
+    - group: apps
+      kind: DaemonSet
+      jsonPointers:
+        - /spec/template/metadata/annotations
+        - /status

@@ -1,0 +1,51 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
+.venv
+
+# Environment
+.env
+.env.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Git
+.git/
+.gitignore
+
+# Documentation
+README.md
+*.md
+
+# Other
+*.log
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Docker-specific 
+docker-compose.yaml
+docker-compose.yml
+Dockerfile
+nginx/
+tests/
+Jenkinsfile
+.dockerignore
+requirements-dev.txt
+*.egg-info/
+dist/
+build/

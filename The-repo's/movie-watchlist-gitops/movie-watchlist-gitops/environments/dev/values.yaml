@@ -1,0 +1,35 @@
+replicaCount: 2
+
+image:
+  repository: 435073375959.dkr.ecr.ap-south-1.amazonaws.com/movie-watchlist
+  tag: "883da72"
+  
+  pullPolicy: IfNotPresent
+
+resources:
+  limits:
+    cpu: 500m
+    memory: 512Mi
+  requests:
+    cpu: 250m
+    memory: 256Mi
+
+app:
+  env: development
+
+autoscaling:
+  enabled: false
+
+ingress:
+  enabled: true
+  className: "nginx"
+  hosts:
+    - host: movie-watchlist.ddns.net
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: true
+  certManager:
+    enabled: true
+    issuer: letsencrypt-prod
+  annotations: {}  

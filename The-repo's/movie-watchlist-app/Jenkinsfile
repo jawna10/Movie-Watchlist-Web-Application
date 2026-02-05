@@ -1,0 +1,399 @@
+
+pipeline {
+    agent any
+    
+    environment {
+        AWS_REGION = 'ap-south-1'
+        IMAGE_TAG = "${env.GIT_COMMIT.take(7)}"
+        APP_NAME = 'movie-watchlist'
+        VERSION = ''
+        
+        // Jenkins global variables
+        ECR_REPO_URL = "${env.ECR_REPO_URL}"
+        APP_TEST_URL = "${env.APP_TEST_URL}"
+        SLACK_CHANNEL = "${env.SLACK_CHANNEL ?: '#jenkins'}"
+        GITOPS_REPO = "${env.GITOPS_REPO ?: 'jawna10/movie-watchlist-gitops'}"
+        GITOPS_CREDENTIALS = 'github-token'
+        K8S_CLUSTER = "${env.K8S_CLUSTER ?: 'movie-watchlist-dev'}"
+        K8S_NAMESPACE = "${env.K8S_NAMESPACE ?: 'movie-watchlist'}"
+    }
+    
+    stages {
+        stage('Checkout') {
+            steps {
+                checkout scm
+                script {
+                    env.GIT_COMMIT = sh(returnStdout: true, script: 'git rev-parse HEAD').trim()
+                    env.IMAGE_TAG = env.GIT_COMMIT.take(7)
+                    
+                    def gitTag = sh(returnStdout: true, script: 'git describe --tags --exact-match 2>/dev/null || echo ""').trim()
+                    
+                    if (gitTag) {
+                        env.VERSION = gitTag
+                        env.IMAGE_TAG = gitTag
+                        echo "Using version from Git tag: ${env.VERSION}"
+                    } else {
+                        env.VERSION = "dev-${env.IMAGE_TAG}"
+                        echo "No Git tag found, using development version: ${env.VERSION}"
+                    }
+                }
+            }
+        }
+        
+        stage('code-check') {
+            steps {
+                script {
+                    echo "Building application..."
+                    sh 'python3 -m py_compile app.py'
+                }
+            }
+        }
+        
+        stage('Test') {
+            steps {
+                script {
+                    echo "Running unit tests..."
+                    sh '''
+                        python3 -m venv venv
+                        . venv/bin/activate
+                        pip install --no-cache-dir -r requirements.txt   
+                        python -m pytest tests/ -v --tb=short --junitxml=test-results.xml || exit 1
+                        
+                        deactivate
+                    '''
+                }
+            }
+            post {
+                always {
+                    junit 'test-results.xml'
+                }
+                success {
+                    echo "All unit tests passed!"
+                }
+                failure {
+                    echo "Unit tests failed!"
+                }
+            }
+        }
+        
+        stage('Packaging') {
+            steps {
+                script {
+                    echo "Building Docker image with cache..."
+                    sh """
+                        export DOCKER_BUILDKIT=1
+                        
+                        docker pull ${ECR_REPO_URL}:latest || true
+                        
+                        docker build \
+                            --build-arg BUILDKIT_INLINE_CACHE=1 \
+                            --cache-from ${ECR_REPO_URL}:latest \
+                            -t ${APP_NAME}:${IMAGE_TAG} .
+                        
+                        docker tag ${APP_NAME}:${IMAGE_TAG} ${APP_NAME}:latest
+                    """
+                }
+            }
+        }
+        
+        stage('Integration Tests') {
+            when {
+                anyOf {
+                    branch 'main'
+                    branch 'feature/*'
+                }
+            }
+            steps {
+                script {
+                    def testUrl = getTestUrl()
+                    echo "Running integration tests against: ${testUrl}"
+                    runIntegrationTests(testUrl)
+                }
+            }
+            post {
+                always {
+                    sh 'docker compose down -v || true'
+                }
+            }
+        }
+
+        stage('Tag') {
+            when {
+                branch 'main'
+            }
+            steps {
+                script {
+                    echo "Creating Git tag for release..."
+            
+                    def lastTag = sh(
+                        returnStdout: true, 
+                        script: 'git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0"'
+                    ).trim()
+            
+                    echo "Last tag: ${lastTag}"
+            
+                    def version = lastTag.replaceAll('v', '')
+                    def versionParts = version.tokenize('.')
+                    def major = versionParts[0].toInteger()
+                    def minor = versionParts[1].toInteger()
+                    def patch = versionParts[2].toInteger() + 1
+            
+                    def newVersion = "v${major}.${minor}.${patch}"
+                    env.VERSION = newVersion
+                    env.IMAGE_TAG = newVersion
+            
+                    echo "New version: ${newVersion}"
+            
+                    withCredentials([usernamePassword(
+                        credentialsId: 'github-token',
+                        usernameVariable: 'GIT_USER',
+                        passwordVariable: 'GIT_TOKEN'
+                    )]) {
+                        sh """
+                            git config user.email "jenkins@ci.local"
+                            git config user.name "Jenkins CI"
+                    
+                            git tag -a ${newVersion} -m "Release ${newVersion} - Build #${env.BUILD_NUMBER}"
+                            git push https://\${GIT_USER}:\${GIT_TOKEN}@github.com/jawna10/movie-watchlist-app.git ${newVersion}
+                        """
+                    }
+            
+                    echo "Tagged release as ${newVersion}"
+                }
+            }
+        }
+        
+        stage('Push to ECR') {
+            when {
+                branch 'main'
+            }
+            steps {
+                script {
+                    def ecrRegistry = env.ECR_REPO_URL.substring(0, env.ECR_REPO_URL.lastIndexOf('/'))
+                    
+                    echo "Logging into ECR using IAM role..."
+                    sh """
+                        aws ecr get-login-password --region ${AWS_REGION} | \
+                        docker login --username AWS --password-stdin ${ecrRegistry}
+                    """
+                    
+                    echo "Pushing image to ECR..."
+                    sh """
+                        docker tag ${APP_NAME}:${IMAGE_TAG} ${ECR_REPO_URL}:${IMAGE_TAG}
+                        docker tag ${APP_NAME}:${IMAGE_TAG} ${ECR_REPO_URL}:latest
+                        
+                        docker push ${ECR_REPO_URL}:${IMAGE_TAG}
+                        docker push ${ECR_REPO_URL}:latest
+                    """
+                    
+                    echo "Image pushed: ${ECR_REPO_URL}:${IMAGE_TAG}"
+                }
+            }
+        }
+        
+        stage('Update GitOps Repo') {
+            when {
+                branch 'main'
+            }
+            steps {
+                script {
+                    echo "Updating GitOps repository..."
+            
+                    dir('gitops-checkout') {
+                        // Clone GitOps repo
+                        git branch: 'main',
+                            credentialsId: "${GITOPS_CREDENTIALS}",
+                            url: "https://github.com/${GITOPS_REPO}.git"
+                
+                        // Update file
+                        sh """
+                            git config user.email "jenkins@ci.local"
+                            git config user.name "Jenkins CI"
+                    
+                            sed -i 's|tag: ".*"|tag: "${IMAGE_TAG}"|' environments/dev/values.yaml
+                    
+                            git add environments/dev/values.yaml
+                            git diff --cached --quiet || git commit -m "Update image to ${IMAGE_TAG} [skip ci]"
+                        """
+                
+                        // Push with credentials
+                        withCredentials([usernamePassword(
+                            credentialsId: "${GITOPS_CREDENTIALS}",
+                            usernameVariable: 'GIT_USER',
+                            passwordVariable: 'GIT_TOKEN'
+                        )]) {
+                            sh "git push https://\${GIT_USER}:\${GIT_TOKEN}@github.com/${GITOPS_REPO}.git main"
+                        }
+                    }
+            
+                    echo "GitOps repo updated with tag: ${IMAGE_TAG}"
+                }
+            }
+        }
+
+    }
+
+    post {
+        always {
+            echo "Cleaning up..."
+            sh '''
+                docker compose down -v || true
+                docker builder prune -f --filter "until=24h" || true
+            '''
+        }
+    
+        success {
+            slackSend(
+                channel: env.MY_SLACK_CHANNEL,
+                color: 'good',
+                message: """✅ *BUILD SUCCESS*
+*Job:* ${env.JOB_NAME}
+*Build:* #${env.BUILD_NUMBER}
+*Branch:* ${env.BRANCH_NAME}
+*Version:* ${env.VERSION}
+*Image:* ${IMAGE_TAG}
+*Duration:* ${currentBuild.durationString.replace(' and counting', '')}
+*Deployed:* ${ECR_REPO_URL}:${IMAGE_TAG}"""
+            )
+        }
+    
+        failure {
+            slackSend(
+                channel: env.MY_SLACK_CHANNEL,
+                color: 'danger',
+                message: """❌ *BUILD FAILED*
+*Job:* ${env.JOB_NAME}
+*Build:* #${env.BUILD_NUMBER}
+*Branch:* ${env.BRANCH_NAME}
+*Failed Stage:* ${env.STAGE_NAME}
+📋 *Logs:* ${env.BUILD_URL}console"""
+            )
+        }
+    
+        unstable {
+            slackSend(
+                channel: env.MY_SLACK_CHANNEL,
+                color: 'warning',
+                message: """⚠️ *BUILD UNSTABLE*
+*Job:* ${env.JOB_NAME}
+*Build:* #${env.BUILD_NUMBER}
+*Branch:* ${env.BRANCH_NAME}
+📋 *Logs:* ${env.BUILD_URL}console"""
+            )
+        }
+    }
+}
+
+
+// Helper function for integration tests
+def runIntegrationTests(String testUrl) {
+    sh """
+        docker compose up -d
+        
+        echo "Waiting for services to start..."
+        sleep 15
+        
+        TEST_URL="${testUrl}"
+        TESTS_PASSED=0
+        TESTS_FAILED=0
+        
+        echo "=========================================="
+        echo "Running Integration Tests"
+        echo "=========================================="
+        
+        # Test 1: Health endpoint
+        echo "Testing /health endpoint..."
+        if curl -f \${TEST_URL}/health; then
+            echo " Health check passed"
+            TESTS_PASSED=\$((TESTS_PASSED + 1))
+        else
+            echo " Health check failed"
+            TESTS_FAILED=\$((TESTS_FAILED + 1))
+        fi
+        
+        # Test 2: Metrics endpoint
+        echo "Testing /app-metrics endpoint..."
+        if curl -f \${TEST_URL}/app-metrics; then
+            echo "Metrics check passed"
+            TESTS_PASSED=\$((TESTS_PASSED + 1))
+        else
+            echo "Metrics check failed"
+            TESTS_FAILED=\$((TESTS_FAILED + 1))
+        fi
+        
+        # Test 3: POST movie
+        echo "Testing POST /movie..."
+        if curl -X POST \${TEST_URL}/movie/test-movie-1 \
+          -H "Content-Type: application/json" \
+          -d '{"title":"Test Movie","genre":"Action","year":2024,"rating":8.5,"watched":true}' \
+          -f; then
+            echo "POST test passed"
+            TESTS_PASSED=\$((TESTS_PASSED + 1))
+        else
+            echo "POST test failed"
+            TESTS_FAILED=\$((TESTS_FAILED + 1))
+        fi
+        
+        # Test 4: GET movie
+        echo "Testing GET /movie..."
+        if curl -f \${TEST_URL}/movie/test-movie-1; then
+            echo "GET test passed"
+            TESTS_PASSED=\$((TESTS_PASSED + 1))
+        else
+            echo "GET test failed"
+            TESTS_FAILED=\$((TESTS_FAILED + 1))
+        fi
+        
+        # Test 5: DELETE movie
+        echo "Testing DELETE /movie..."
+        if curl -X DELETE -f \${TEST_URL}/movie/test-movie-1; then
+            echo "DELETE test passed"
+            TESTS_PASSED=\$((TESTS_PASSED + 1))
+        else
+            echo "DELETE test failed"
+            TESTS_FAILED=\$((TESTS_FAILED + 1))
+        fi
+        
+        echo ""
+        echo "=========================================="
+        echo "Integration Test Results:"
+        echo "Passed: \$TESTS_PASSED/5"
+        echo "Failed: \$TESTS_FAILED/5"
+        echo "=========================================="
+        
+        echo "\$TESTS_PASSED" > integration-tests-passed.txt
+        echo "\$TESTS_FAILED" > integration-tests-failed.txt
+        
+        if [ \$TESTS_FAILED -gt 0 ]; then
+            exit 1
+        fi
+    """
+}
+
+// Helper function to determine test URL
+def getTestUrl() {
+    def testUrl = env.APP_TEST_URL
+    
+    if (!testUrl) {
+        echo "APP_TEST_URL not set, attempting to auto-detect..."
+        try {
+            def publicIp = sh(
+                returnStdout: true, 
+                script: 'curl -s http://169.254.169.254/latest/meta-data/public-ipv4 2>/dev/null || echo ""'
+            ).trim()
+            
+            if (publicIp) {
+                testUrl = "http://${publicIp}:8083"
+                echo "Auto-detected test URL: ${testUrl}"
+            } else {
+                testUrl = "http://localhost:8083"
+                echo "Using localhost: ${testUrl}"
+            }
+        } catch (Exception e) {
+            testUrl = "http://localhost:8083"
+            echo "Exception caught, defaulting to localhost: ${testUrl}"
+        }
+    }
+    
+    return testUrl
+}

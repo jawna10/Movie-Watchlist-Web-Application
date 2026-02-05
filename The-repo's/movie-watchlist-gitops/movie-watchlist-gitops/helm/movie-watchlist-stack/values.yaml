@@ -1,0 +1,34 @@
+# Values for the complete Movie Watchlist stack
+
+# Movie Watchlist Application
+movie-watchlist:
+  replicaCount: 2
+  
+  image:
+    repository: 435073375959.dkr.ecr.ap-south-1.amazonaws.com/movie-watchlist
+    tag: "latest"
+    pullPolicy: IfNotPresent
+  
+  resources:
+    limits:
+      cpu: 500m
+      memory: 512Mi
+    requests:
+      cpu: 250m
+      memory: 256Mi
+  
+  ingress:
+    enabled: true
+    className: "alb"
+    annotations:
+      alb.ingress.kubernetes.io/scheme: internet-facing
+      alb.ingress.kubernetes.io/target-type: ip
+      alb.ingress.kubernetes.io/healthcheck-path: /health
+  
+  # MongoDB connection - points to the MongoDB Community service
+  mongodb:
+    host: mongodb-svc
+    port: 27017
+    database: movie_watchlist
+    auth:
+      enabled: false

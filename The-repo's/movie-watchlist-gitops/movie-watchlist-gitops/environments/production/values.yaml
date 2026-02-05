@@ -1,0 +1,25 @@
+# Production environment overrides
+
+replicaCount: 3
+
+image:
+  repository: 435073375959.dkr.ecr.ap-south-1.amazonaws.com/movie-watchlist
+  tag: "latest"
+  pullPolicy: IfNotPresent
+
+resources:
+  limits:
+    cpu: 1000m
+    memory: 1Gi
+  requests:
+    cpu: 500m
+    memory: 512Mi
+
+app:
+  env: production
+
+autoscaling:
+  enabled: true
+  minReplicas: 3
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 70
