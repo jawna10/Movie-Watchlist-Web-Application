@@ -47,7 +47,3 @@ Full-stack movie watchlist application deployed on AWS with complete CI/CD pipel
 
 Infrastructure provisioned with Terraform on AWS EKS. Application deployed via ArgoCD using GitOps principles.
 
-## Screenshots
-
-![Application](project-pictures/App.png)
-![Monitoring](project-pictures/monitoring-App.png)
